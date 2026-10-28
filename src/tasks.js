@@ -55,24 +55,34 @@ const safePrompt = (p) => (p.startsWith('-') ? ' ' + p : p);
 
 // Shell commands a headless run may use without asking (read-only git plus
 // fetch/pull). Everything else stays denied because nobody can approve it.
-const CLAUDE_ALLOWED = ['git status', 'git log', 'git diff', 'git show', 'git fetch', 'git pull', 'git remote -v',
-  'git rev-parse', 'git ls-files', 'git blame', 'ls', 'pwd', 'cd'].map((c) => `Bash(${c}:*)`).join(',');
+// Agents often write `git -C <folder> pull`, so allow that form too, but only
+// for the run's own folder.
+const GIT_SUBS = ['status', 'log', 'diff', 'show', 'fetch', 'pull', 'rev-parse', 'ls-files', 'blame'];
+function claudeAllowed(cwd) {
+  const rules = [];
+  for (const sub of GIT_SUBS) {
+    rules.push(`Bash(git ${sub}:*)`);
+    if (cwd && !/[,"]/.test(cwd)) rules.push(`Bash(git -C ${cwd} ${sub}:*)`, `Bash(git -C "${cwd}" ${sub}:*)`);
+  }
+  rules.push('Bash(git remote -v:*)', 'Bash(ls:*)', 'Bash(pwd:*)', 'Bash(cd:*)');
+  return rules.join(',');
+}
 // A print-mode run exits as soon as the main agent answers, which kills any
 // subagent still running in the background. Tell the agent up front.
 const CLAUDE_RULE = [
   '이 요청은 사무실 대화창에서 보낸 1회성 실행이다. 최종 답을 마치는 순간 프로세스가 종료되고, 그때 아직 돌고 있는 하위 에이전트는 모두 끊긴다.',
   '그러니 하위 에이전트(Task/Agent)를 쓸 때는 절대 백그라운드(run_in_background)로 돌리지 말고, 모든 하위 에이전트의 결과를 받은 뒤에 최종 답을 해라. "진행 중입니다, 나중에 정리하겠다" 같은 중간 보고로 끝내지 마라.',
   '자동 허용된 셸 명령은 git status/log/diff/show/fetch/pull/rev-parse/ls-files/blame, git remote -v, ls, pwd, cd 뿐이고 나머지는 거부된다.',
-  'git은 지금 작업 폴더 안에서만 된다. 다른 폴더로 이동해서 git을 실행하는 것은 Claude Code 보안 규칙상 승인이 필요해 거부되니 시도하지 말고, 그 폴더의 .git 파일과 문서를 Read로 읽어서 확인해라. 파일 수정은 허용된다.',
+  'git은 `git -C` 없이 지금 작업 폴더에서 바로 `git pull`, `git log`처럼 실행해라. git은 지금 작업 폴더 안에서만 된다. 다른 폴더로 이동해서 git을 실행하는 것은 Claude Code 보안 규칙상 승인이 필요해 거부되니 시도하지 말고, 그 폴더의 .git 파일과 문서를 Read로 읽어서 확인해라. 파일 수정은 허용된다.',
 ].join(' ');
 
-function command(agent, prompt, resumeId, fork) {
+function command(agent, prompt, resumeId, fork, cwd) {
   const p = safePrompt(prompt);
   if (agent === 'claude') {
     const args = ['-p', p, '--permission-mode', 'acceptEdits', '--append-system-prompt', CLAUDE_RULE];
     if (resumeId) args.unshift('--resume', resumeId);
     if (resumeId && fork) args.push('--fork-session');
-    args.push('--allowedTools', CLAUDE_ALLOWED); // keep last: it takes a list
+    args.push('--allowedTools', claudeAllowed(cwd)); // keep last: it takes a list
     return ['claude', args];
   }
   if (agent === 'codex') {
@@ -126,7 +136,7 @@ function originOk(req) {
 }
 
 function start({ agent, cwd, prompt, resumeId, label, key, fork }) {
-  const cmd = command(agent, prompt, resumeId, fork);
+  const cmd = command(agent, prompt, resumeId, fork, cwd);
   if (!cmd) throw new Error('지원하지 않는 에이전트예요');
   fs.mkdirSync(LOG_DIR, { recursive: true });
   const id = `${Date.now().toString(36)}-${++seq}`;
