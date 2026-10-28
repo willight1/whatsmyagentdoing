@@ -12,12 +12,14 @@ const STATIC = {
   '/office3d.js': ['office3d.js', 'text/javascript; charset=utf-8'],
   '/i18n.js': ['i18n.js', 'text/javascript; charset=utf-8'],
   '/popout.js': ['popout.js', 'text/javascript; charset=utf-8'],
+  '/chat.js': ['chat.js', 'text/javascript; charset=utf-8'], // 사무실 대화
 };
 const TYPES = { '.js': 'text/javascript; charset=utf-8', '.glb': 'model/gltf-binary', '.png': 'image/png', '.svg': 'image/svg+xml', '.json': 'application/json' };
 // 3D models, served as-is (3D view only).
 const MOUNTS = { '/assets/': path.join(__dirname, '..', 'assets') };
 const scenes = require('./scenes');
 const updater = require('./update');
+const tasks = require('./tasks'); // 말로 일 시키기
 const { ompResumeCommand } = require('./omp');
 
 function serveFile(res, root, rel) {
@@ -121,6 +123,7 @@ function createServer(watcher, opts, { onShutdown, onRestart } = {}) {
       return;
     }
     const url = new URL(req.url, 'http://localhost');
+    if (tasks.handle(req, res, url, watcher, opts)) return; // 말로 일 시키기 (src/tasks.js)
     if (STATIC[url.pathname]) {
       const [file, type] = STATIC[url.pathname];
       res.writeHead(200, { 'content-type': type, 'cache-control': 'no-store' });
