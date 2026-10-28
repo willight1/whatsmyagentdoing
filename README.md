@@ -1,3 +1,70 @@
+# 👀 whatsmyagentdoing + 💬 사무실 대화
+
+> [Charonyuu/whatsmyagentdoing](https://github.com/Charonyuu/whatsmyagentdoing) (MIT)을 포크해서, 사무실 화면에서 **에이전트 이름을 불러 말로 일을 시키고 답을 받는 기능**을 더한 버전입니다.
+
+원본은 내 컴퓨터의 Claude Code · Codex · Gemini CLI 에이전트가 뭘 하는지 **보여주기만** 합니다. 이 버전은 거기에 대화창을 붙였습니다.
+
+## 설치 (1분)
+
+Node.js 18 이상이 필요합니다. 터미널에 붙여넣으세요.
+
+```bash
+# Claude Code
+git clone --depth 1 https://github.com/willight1/whatsmyagentdoing ~/.claude/skills/myoffice
+# Codex
+git clone --depth 1 https://github.com/willight1/whatsmyagentdoing ~/.codex/skills/myoffice
+# 실행 (또는 Claude Code / Codex에서 /myoffice)
+node ~/.claude/skills/myoffice/bin/cli.js
+```
+
+브라우저에 http://localhost:4545 사무실이 열립니다.
+
+## 💬 사무실 대화 사용법
+
+- **Enter**: 사무실 화면에서 누르면 대화창이 열립니다. **Esc**: 닫기
+- **한 명에게**: `김아현한테 오늘 한 일 요약해줘`, `coin아 봇 상태 어때?`, `@박희주 이거 확인해줘`
+- **여러 명에게**: `김아현, 박희주한테 ~`, `김아현이랑 coin한테 ~`
+- **전체 / 폴더 단위**: `모두한테 ~`, `inter 모두한테 ~` (inter 폴더 안의 사람 전원)
+- 이름을 안 부르면 **마지막으로 말한 상대**에게 갑니다.
+- 대화창 아래 이름 버튼, 「👥 모두」, Shift+클릭으로도 고를 수 있습니다.
+
+보내면 각 에이전트가 **하던 대화를 이어서** 일하고(사무실 캐릭터가 책상에서 일함), 답이 오면 대화창과 **캐릭터 머리 위 말풍선**에 뜹니다. 같은 사람에게 연달아 말하면 줄을 세워 순서대로 처리하고, 동시에 6명까지 실행합니다.
+
+> 사무실에 보이는 이름은 **프로젝트 폴더 이름**입니다. 같은 이름이 여러 개면 가장 최근 대화로 갑니다.
+
+## 권한과 안전장치
+
+대화창 실행은 승인 버튼을 눌러줄 사람이 없는 백그라운드 실행이라, 자동 허용 범위를 좁게 잡았습니다.
+
+- **파일 수정**: 자동 허용
+- **셸 명령**: `git status/log/diff/show/fetch/pull/rev-parse/ls-files/blame`, `git remote -v`, `ls`, `pwd`, `cd`만 허용. 나머지(삭제, 설치 등)는 거부
+- 다른 폴더로 이동해서 git을 실행하는 것은 Claude Code 보안 규칙상 거부됩니다. 여러 프로젝트를 다룰 때는 `모두한테 ~`처럼 **각자 자기 폴더에서 하게** 보내세요.
+- 하위 에이전트는 백그라운드로 돌리지 말고 결과를 다 받은 뒤 답하도록 규칙을 붙여 실행합니다 (답하는 순간 프로세스가 끝나 하위 에이전트가 끊기는 문제 방지).
+- 터미널에서 지금 일하는 중인 에이전트에게 말하면: Claude는 대화를 복사해 따로 이어서 일하고(`--fork-session`), Codex·Gemini는 끝날 때까지 기다립니다.
+- 다른 웹사이트가 몰래 보내지 못하게 전용 헤더와 Origin을 확인하고, 서버는 원본처럼 `127.0.0.1`에만 열립니다.
+- 실행 기록: `~/.whatsmyagentdoing/tasks/`
+- 기능 끄기: `WMAD_NO_TASKS=1 node bin/cli.js`
+
+실제로 실행되는 명령:
+
+| 에이전트 | 명령 |
+| --- | --- |
+| Claude | `claude --resume <세션ID> -p "할 말" --permission-mode acceptEdits --allowedTools <git 목록>` |
+| Codex | `codex exec --sandbox workspace-write resume <세션ID> "할 말"` |
+| Gemini | `gemini --resume <세션ID> -p "할 말" --approval-mode auto_edit` |
+
+Claude Code로만 실제 테스트했습니다. Codex·Gemini는 공식 문서 기준으로 작성했고 실제 실행은 확인하지 않았습니다.
+
+## 원본과 달라진 파일
+
+- 새 파일: `src/tasks.js` (서버: 실행 · 권한 · 답 받기), `public/chat.js` (화면: 대화창 · 이름 인식 · 머리 위 말풍선)
+- 수정: `src/server.js` 3줄, `public/index.html` 1줄, `src/update.js` 업데이트 확인 주소(이 저장소)
+- 데모 모드(`--demo`)에서는 대화 기능이 꺼집니다.
+
+---
+
+아래는 원본 README입니다.
+
 # 👀 whatsmyagentdoing
 
 **A Claude Code / Codex skill: type `/myoffice` and see what every Claude Code, Codex, Gemini CLI and OMP (oh-my-pi) agent on your machine is doing — live, in a little office.**
@@ -16,16 +83,16 @@ OMP support: [paths, profiles, Resume and limitations](docs/omp.md).
 
 **Easiest: ask your agent.** Paste this into Claude Code or Codex:
 
-> Install the myoffice skill from https://github.com/Charonyuu/whatsmyagentdoing: clone it with `git clone --depth 1` into `~/.claude/skills/myoffice` (for Codex: `~/.codex/skills/myoffice`), check that `node --version` is 18 or newer, then tell me to start a new session and type /myoffice.
+> Install the myoffice skill from https://github.com/willight1/whatsmyagentdoing: clone it with `git clone --depth 1` into `~/.claude/skills/myoffice` (for Codex: `~/.codex/skills/myoffice`), check that `node --version` is 18 or newer, then tell me to start a new session and type /myoffice.
 
 Or do it yourself:
 
 ```bash
 # Claude Code
-git clone --depth 1 https://github.com/Charonyuu/whatsmyagentdoing ~/.claude/skills/myoffice
+git clone --depth 1 https://github.com/willight1/whatsmyagentdoing ~/.claude/skills/myoffice
 
 # Codex
-git clone --depth 1 https://github.com/Charonyuu/whatsmyagentdoing ~/.codex/skills/myoffice
+git clone --depth 1 https://github.com/willight1/whatsmyagentdoing ~/.codex/skills/myoffice
 ```
 
 Then type **`/myoffice`** (or just ask *"what are my agents doing?"*). The office opens in your browser. Update later with `git -C ~/.claude/skills/myoffice pull`.
