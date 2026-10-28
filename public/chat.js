@@ -18,7 +18,7 @@
   // ---------- 스타일 ----------
   const css = document.createElement('style');
   css.textContent = `
-  .wc { position: fixed; right: 20px; bottom: 20px; z-index: 70; width: 380px; height: min(520px, calc(100vh - 40px)); display: none; flex-direction: column;
+  .wc { position: fixed; right: 20px; bottom: 20px; z-index: 70; width: 400px; height: min(600px, calc(100vh - 40px)); display: none; flex-direction: column;
     background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 18px; box-shadow: 0 12px 40px rgba(0,0,0,.25); font-size: 13px; overflow: hidden; }
   .wc.on { display: flex; }
   .wc-head { display: flex; align-items: center; gap: 8px; padding: 12px 14px; border-bottom: 1px solid var(--line); font-weight: 600; }
@@ -36,6 +36,19 @@
   .wc-m.ag.bad .txt { color: var(--error); }
   .wc-m.sys { align-self: center; color: var(--faint); font-size: 11.5px; text-align: center; }
   .wc-m .stop { border: 0; background: none; color: var(--faint); cursor: pointer; font: inherit; font-size: 11px; padding: 0; }
+  .wc-appr { display: flex; flex-direction: column; gap: 8px; padding: 0 14px; }
+  .wc-appr:empty { display: none; }
+  .wc-card { border: 1px solid var(--waiting); background: var(--bg); border-radius: 12px; padding: 9px 11px; }
+  .wc-card .h { font-weight: 600; margin-bottom: 4px; }
+  .wc-card .why { color: var(--muted); font-size: 12px; margin-bottom: 4px; }
+  .wc-card code { display: block; white-space: pre-wrap; word-break: break-all; font-family: ui-monospace, monospace; font-size: 11.5px;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; max-height: 140px; overflow: auto; }
+  .wc-card .btns { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; align-items: center; }
+  .wc-card .btns button { border: 1px solid var(--line); background: var(--panel); color: var(--ink); border-radius: 999px; padding: 4px 12px; font: inherit; font-size: 12px; cursor: pointer; white-space: nowrap; }
+  .wc-card .btns .ok { background: var(--done); border-color: var(--done); color: #fff; font-weight: 600; }
+  .wc-card .btns .no { color: var(--error); }
+  .wc-card .btns .left { width: 100%; color: var(--faint); font-size: 11px; }
+  .wc-fab.alert { background: var(--waiting); }
   .wc-chips { display: flex; gap: 6px; flex-wrap: wrap; padding: 8px 14px 0; }
   .wc-chip { border: 1px solid var(--line); background: var(--bg); color: var(--ink); border-radius: 999px; padding: 3px 10px; font: inherit; font-size: 12px; cursor: pointer; }
   .wc-chip.on { border-color: var(--tool); color: var(--tool); font-weight: 600; }
@@ -64,10 +77,12 @@
   box.innerHTML = `
     <div class="wc-head"><span>💬 사무실 대화</span><span class="hint">Enter 열기 · Esc 닫기</span><button class="x" title="닫기 (Esc)">×</button></div>
     <div class="wc-log"></div>
+    <div class="wc-appr"></div>
     <div class="wc-chips"></div>
     <div class="wc-in"><textarea rows="1" placeholder="예: 김아현한테 오늘 한 일 요약해줘"></textarea><button class="send">보내기</button></div>
-    <div class="wc-foot">여러 명: "김아현, 박희주한테 ~" · "모두한테 ~" · Shift+클릭. 이름을 안 부르면 마지막 상대에게 가요. 권한: 파일 수정 + git 명령</div>`;
+    <div class="wc-foot">여러 명: "김아현, 박희주한테 ~" · "모두한테 ~" · Shift+클릭. 이름을 안 부르면 마지막 상대에게 가요. 파일 수정·git은 자동, 그 밖의 명령은 여기서 승인해요</div>`;
   document.body.appendChild(box);
+  const appr = box.querySelector('.wc-appr');
   const log = box.querySelector('.wc-log'), chips = box.querySelector('.wc-chips'), input = box.querySelector('textarea'), sendBtn = box.querySelector('.send');
   const fab = document.createElement('button');
   fab.className = 'wc-fab';
@@ -252,9 +267,10 @@
   async function poll() {
     clearTimeout(timer);
     const waiting = msgs.filter((m) => m.role === 'ag' && m.state === 'wait' && m.taskId);
-    if (!waiting.length && !msgs.some((m) => m.state === 'queue')) return;
+    if (!waiting.length && !msgs.some((m) => m.state === 'queue') && !appr.children.length) return;
     try {
       const j = await fetch('/api/tasks', { cache: 'no-store' }).then((r) => r.json());
+      renderApprovals(j.approvals || []);
       const byId = new Map((j.tasks || []).map((t) => [t.id, t]));
       let changed = false;
       for (const m of waiting) {
@@ -277,9 +293,41 @@
         if (!msgs.some((x) => x.key === m.key && x.state === 'wait')) await dispatch(m);
       }
     } catch {}
-    if (msgs.some((m) => m.role === 'ag' && ((m.state === 'wait' && m.taskId) || m.state === 'queue'))) timer = setTimeout(poll, 2000);
+    if (appr.children.length || msgs.some((m) => m.role === 'ag' && ((m.state === 'wait' && m.taskId) || m.state === 'queue'))) timer = setTimeout(poll, 2000);
   }
   function pollSoon() { clearTimeout(timer); timer = setTimeout(poll, 500); }
+
+  // ---------- 승인 요청 ----------
+  const TOOL_KO = { Bash: '명령 실행', Edit: '파일 수정', Write: '파일 쓰기', MultiEdit: '파일 수정', WebFetch: '웹 페이지 읽기', WebSearch: '웹 검색', Read: '파일 읽기' };
+  const seenAppr = new Set();
+  let apprSig = null;
+  function renderApprovals(list) {
+    const sig = list.map((a) => a.id).join(',');
+    const fresh = list.some((a) => !seenAppr.has(a.id));
+    list.forEach((a) => seenAppr.add(a.id));
+    fab.classList.toggle('alert', list.length > 0);
+    fab.innerHTML = list.length ? `🔐 승인 요청 ${list.length}<kbd>Enter</kbd>` : '💬 대화<kbd>Enter</kbd>';
+    document.title = document.title.replace(/^🔐\s*/, '');
+    if (list.length) document.title = '🔐 ' + document.title;
+    if (fresh && !box.classList.contains('on')) open();
+    if (sig === apprSig) return;
+    apprSig = sig;
+    appr.innerHTML = list.map((a) => {
+      const left = Math.max(0, Math.round((a.at + 5 * 60_000 - Date.now()) / 60_000));
+      return `<div class="wc-card"><div class="h">🔐 ${esc(a.project)}이(가) 허락을 구해요 · ${esc(TOOL_KO[a.tool] || a.tool)}</div>
+        ${a.why ? `<div class="why">${esc(a.why)}</div>` : ''}<code>${esc(a.detail)}</code>
+        <div class="btns"><button class="ok" data-d="allow" data-id="${esc(a.id)}">허용</button>
+        <button data-d="always" data-id="${esc(a.id)}" title="이번 작업이 끝날 때까지 같은 요청은 묻지 않아요">이번 작업 동안 허용</button>
+        <button class="no" data-d="deny" data-id="${esc(a.id)}">거부</button><span class="left">${left}분 안에 답 없으면 거부</span></div></div>`;
+    }).join('');
+    if (list.length) log.scrollTop = log.scrollHeight;
+  }
+  appr.addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-d]'); if (!b) return;
+    b.closest('.wc-card').querySelectorAll('button').forEach((x) => (x.disabled = true));
+    await fetch(`/api/permission/decide?id=${encodeURIComponent(b.dataset.id)}&d=${b.dataset.d}`, { method: 'POST', headers: HEADER });
+    apprSig = null; pollSoon();
+  });
 
   // ---------- 캐릭터 머리 위 말풍선 ----------
   const bubbles = new Map(); // key -> { el, until }
