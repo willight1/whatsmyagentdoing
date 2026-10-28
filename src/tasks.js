@@ -72,16 +72,17 @@ function claudeAllowed(cwd) {
 const CLAUDE_RULE = [
   '이 요청은 사무실 대화창에서 보낸 1회성 실행이다. 최종 답을 마치는 순간 프로세스가 종료되고, 그때 아직 돌고 있는 하위 에이전트는 모두 끊긴다.',
   '그러니 하위 에이전트(Task/Agent)를 쓸 때는 절대 백그라운드(run_in_background)로 돌리지 말고, 모든 하위 에이전트의 결과를 받은 뒤에 최종 답을 해라. "진행 중입니다, 나중에 정리하겠다" 같은 중간 보고로 끝내지 마라.',
-  '자동 허용된 셸 명령은 git status/log/diff/show/fetch/pull/rev-parse/ls-files/blame, git remote -v, ls, pwd, cd 뿐이고 나머지는 거부된다.',
-  'git은 `git -C` 없이 지금 작업 폴더에서 바로 `git pull`, `git log`처럼 실행해라. git은 지금 작업 폴더 안에서만 된다. 다른 폴더로 이동해서 git을 실행하는 것은 Claude Code 보안 규칙상 승인이 필요해 거부되니 시도하지 말고, 그 폴더의 .git 파일과 문서를 Read로 읽어서 확인해라. 파일 수정은 허용된다.',
+  '자동 허용된 셸 명령은 git status/log/diff/show/fetch/pull/rev-parse/ls-files/blame, git remote -v, ls, pwd, cd 이다. 그 밖의 명령은 사용자에게 사무실 대화창으로 승인을 요청하게 되고, 사용자가 거부하거나 5분 안에 답하지 않으면 거부된다. 꼭 필요할 때만 써라.',
+  'git은 `git -C` 없이 지금 작업 폴더에서 바로 `git pull`, `git log`처럼 실행해라. git은 지금 작업 폴더 안에서만 된다. 다른 폴더로 이동해서 git을 실행하는 것도 승인이 필요하다. 파일 수정은 허용된다.',
 ].join(' ');
 
-function command(agent, prompt, resumeId, fork, cwd) {
+function command(agent, prompt, resumeId, fork, cwd, settings) {
   const p = safePrompt(prompt);
   if (agent === 'claude') {
     const args = ['-p', p, '--permission-mode', 'acceptEdits', '--append-system-prompt', CLAUDE_RULE];
     if (resumeId) args.unshift('--resume', resumeId);
     if (resumeId && fork) args.push('--fork-session');
+    if (settings) args.push('--settings', settings);
     args.push('--allowedTools', claudeAllowed(cwd)); // keep last: it takes a list
     return ['claude', args];
   }
@@ -135,11 +136,93 @@ function originOk(req) {
   } catch { return false; }
 }
 
-function start({ agent, cwd, prompt, resumeId, label, key, fork }) {
-  const cmd = command(agent, prompt, resumeId, fork, cwd);
+// ---- 대화창 승인 ----
+// Each Claude run gets a PermissionRequest HTTP hook pointing back here. When the
+// agent wants something outside the allow list, the hook request waits until
+// you press 허용 / 항상 허용 / 거부 in the office chat (or 5 minutes pass).
+const APPROVAL_TIMEOUT = 5 * 60_000;
+const approvals = new Map();
+let aseq = 0;
+
+function hookSettings(base, taskId) {
+  return JSON.stringify({
+    hooks: {
+      PermissionRequest: [{
+        hooks: [{
+          type: 'http',
+          url: `${base}/api/permission?task=${encodeURIComponent(taskId)}`,
+          timeout: 600,
+          headers: { 'x-whatsmyagentdoing': 'permission' },
+        }],
+      }],
+    },
+  });
+}
+
+function decision(behavior, message, updatedPermissions) {
+  const d = { behavior };
+  if (behavior === 'deny' && message) d.message = message;
+  if (behavior === 'allow' && updatedPermissions && updatedPermissions.length) d.updatedPermissions = updatedPermissions;
+  return { hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: d } };
+}
+
+function summarize(tool, input) {
+  const i = input || {};
+  if (tool === 'Bash') return String(i.command || '');
+  if (i.file_path) return String(i.file_path);
+  if (i.url) return String(i.url);
+  if (i.path) return String(i.path);
+  if (i.pattern) return String(i.pattern);
+  const s = JSON.stringify(i);
+  return s.length > 300 ? s.slice(0, 300) + '…' : s;
+}
+
+function askUser(t, input, res) {
+  const id = `p${Date.now().toString(36)}${++aseq}`;
+  const tool = String(input.tool_name || '?');
+  const a = {
+    id, taskId: t.id, project: t.project, agent: t.agent, key: t.key, tool,
+    detail: summarize(tool, input.tool_input), why: input.tool_input && input.tool_input.description ? String(input.tool_input.description) : '',
+    at: Date.now(), suggestions: Array.isArray(input.permission_suggestions) ? input.permission_suggestions : [],
+  };
+  a.reply = (body) => {
+    if (!approvals.has(id)) return;
+    approvals.delete(id);
+    clearTimeout(a.timer);
+    t.waiting = Math.max(0, (t.waiting || 1) - 1);
+    try { json(res, 200, body); } catch {}
+  };
+  a.timer = setTimeout(() => a.reply(decision('deny', '사용자가 5분 안에 답하지 않아 거부됐어요')), APPROVAL_TIMEOUT);
+  res.on('close', () => { if (approvals.has(id) && !res.writableEnded) { approvals.delete(id); clearTimeout(a.timer); t.waiting = Math.max(0, (t.waiting || 1) - 1); } });
+  approvals.set(id, a);
+  t.waiting = (t.waiting || 0) + 1;
+}
+
+function decide(id, d) {
+  const a = approvals.get(id);
+  if (!a) return false;
+  if (d === 'allow') a.reply(decision('allow'));
+  else if (d === 'always') {
+    // Remember for the rest of this run only (destination: session).
+    const ups = a.suggestions.filter((x) => x && x.type === 'addRules').map((x) => ({ ...x, destination: 'session' }));
+    a.reply(decision('allow', null, ups));
+  } else a.reply(decision('deny', '사용자가 대화창에서 거부했어요'));
+  return true;
+}
+
+function dropApprovals(taskId, why) {
+  for (const a of [...approvals.values()]) if (a.taskId === taskId) a.reply(decision('deny', why));
+}
+
+function listApprovals() {
+  return [...approvals.values()].map(({ id, taskId, project, agent, key, tool, detail, why, at }) => ({ id, taskId, project, agent, key, tool, detail, why, at }));
+}
+
+function start({ agent, cwd, prompt, resumeId, label, key, fork, base }) {
+  const id = `${Date.now().toString(36)}-${++seq}`;
+  const cmd = command(agent, prompt, resumeId, fork, cwd, base ? hookSettings(base, id) : null);
   if (!cmd) throw new Error('지원하지 않는 에이전트예요');
   fs.mkdirSync(LOG_DIR, { recursive: true });
-  const id = `${Date.now().toString(36)}-${++seq}`;
   const logFile = path.join(LOG_DIR, `${id}-${agent}.log`);
   const out = fs.openSync(logFile, 'a');
   fs.writeSync(out, `# ${new Date().toISOString()} ${agent} ${resumeId ? 'resume ' + resumeId : 'new'}\n# cwd: ${cwd}\n# prompt: ${prompt}\n\n`);
@@ -178,6 +261,7 @@ function start({ agent, cwd, prompt, resumeId, label, key, fork }) {
       reject(new Error(t.tail));
     });
     child.once('close', (code) => {
+      dropApprovals(t.id, '작업이 끝났어요');
       if (t.status === 'error') return;
       t.exitCode = code;
       t.status = code === 0 ? 'done' : 'failed';
@@ -191,13 +275,32 @@ function start({ agent, cwd, prompt, resumeId, label, key, fork }) {
 // Returns true if it handled the request.
 function handle(req, res, url, watcher, opts) {
   if (url.pathname === '/api/tasks' && req.method === 'GET') {
-    json(res, 200, { enabled: enabled(opts), tasks: list() });
+    json(res, 200, { enabled: enabled(opts), tasks: list(), approvals: listApprovals() });
+    return true;
+  }
+  if (url.pathname === '/api/permission' && req.method === 'POST') {
+    // Called by Claude Code's PermissionRequest HTTP hook of a run we started.
+    if (req.headers['x-whatsmyagentdoing'] !== 'permission') { res.writeHead(403).end(); return true; }
+    const t = tasks.find((x) => x.id === url.searchParams.get('task'));
+    readBody(req, 512 * 1024).then((raw) => {
+      let input = {};
+      try { input = JSON.parse(raw); } catch {}
+      if (!t || !t.child) return json(res, 200, decision('deny', '작업이 이미 끝났어요'));
+      askUser(t, input, res);
+    }, () => json(res, 200, decision('deny', '요청이 너무 커요')));
+    return true;
+  }
+  if (url.pathname === '/api/permission/decide' && req.method === 'POST') {
+    if (req.headers['x-whatsmyagentdoing'] !== 'task' || !originOk(req)) { res.writeHead(403).end(); return true; }
+    const ok = decide(url.searchParams.get('id'), url.searchParams.get('d'));
+    json(res, ok ? 200 : 404, { ok, error: ok ? undefined : '이미 처리됐거나 없는 요청이에요' });
     return true;
   }
   if (url.pathname === '/api/tasks/stop' && req.method === 'POST') {
     if (req.headers['x-whatsmyagentdoing'] !== 'task' || !originOk(req)) { res.writeHead(403).end(); return true; }
     const t = tasks.find((x) => x.id === url.searchParams.get('id'));
     if (!t || !t.child) { json(res, 404, { ok: false, error: '실행 중인 작업이 없어요' }); return true; }
+    dropApprovals(t.id, '사용자가 작업을 중지했어요');
     t.child.kill('SIGTERM');
     t.status = 'stopped';
     json(res, 200, { ok: true });
@@ -251,7 +354,7 @@ function handle(req, res, url, watcher, opts) {
     if (!fs.existsSync(cwd)) return json(res, 400, { ok: false, error: `폴더가 없어요: ${cwd}` });
 
     try {
-      const t = await start({ agent, cwd, prompt, resumeId, label, key, fork });
+      const t = await start({ agent, cwd, prompt, resumeId, label, key, fork, base: `http://${req.headers.host}` });
       json(res, 200, { ok: true, task: publicTask(t) });
     } catch (e) {
       json(res, 500, { ok: false, error: String(e.message || e) });
@@ -260,4 +363,4 @@ function handle(req, res, url, watcher, opts) {
   return true;
 }
 
-module.exports = { handle, list, command, childEnv };
+module.exports = { handle, list, command, childEnv, listApprovals };
